@@ -11,6 +11,7 @@
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="hospitals-data.js" onerror="console.warn('找不到 hospitals-data.js，將改用 Worker')"></script>
 
   <style>
     :root {
@@ -218,6 +219,20 @@
         shortName,
       };
     }
+
+    // 讀取由 fetch_hospitals.py 產生的離線資料（hospitals-data.js）
+    const STATIC_DATA = (typeof window !== "undefined" && window.HOSPITAL_DATA && Array.isArray(window.HOSPITAL_DATA.hospitals))
+      ? window.HOSPITAL_DATA : null;
+
+    const buildStaticCache = () => {
+      const cache = {};
+      for (const name of (STATIC_DATA.counties || ALL_22_COUNTIES)) cache[normCounty(name)] = [];
+      for (const h of STATIC_DATA.hospitals.map(enrichHospital)) {
+        const k = normCounty(h.county);
+        if (cache[k]) cache[k].push(h);
+      }
+      return cache;
+    };
 
     function ShareRing({ percent, color, size = 64 }) {
       const stroke = 6;
@@ -439,23 +454,31 @@
     }
 
     function App() {
-      const cacheRef = useRef({
-        "嘉義縣": INITIAL_CACHE_HOSPITALS.filter((h) => normCounty(h.county) === "嘉義縣").map(enrichHospital),
-        "嘉義市": INITIAL_CACHE_HOSPITALS.filter((h) => normCounty(h.county) === "嘉義市").map(enrichHospital),
-      });
+      const cacheRef = useRef(null);
+      if (cacheRef.current === null) {
+        cacheRef.current = STATIC_DATA ? buildStaticCache() : {
+          "嘉義縣": INITIAL_CACHE_HOSPITALS.filter((h) => normCounty(h.county) === "嘉義縣").map(enrichHospital),
+          "嘉義市": INITIAL_CACHE_HOSPITALS.filter((h) => normCounty(h.county) === "嘉義市").map(enrichHospital),
+        };
+      }
       const seqRef = useRef(0);
 
       const [selectedCounties, setSelectedCounties] = useState(["嘉義縣", "嘉義市"]);
-      const [hospitals, setHospitals] = useState(() => INITIAL_CACHE_HOSPITALS.map(enrichHospital));
+      const [hospitals, setHospitals] = useState(() => STATIC_DATA
+        ? ["嘉義縣", "嘉義市"].flatMap((c) => cacheRef.current[c] || [])
+        : INITIAL_CACHE_HOSPITALS.map(enrichHospital));
       const [dropdownOpen, setDropdownOpen] = useState(false);
       const [sortBy, setSortBy] = useState("totalBeds");
       const [viewMode, setViewMode] = useState("grid");
       const [search, setSearch] = useState("");
       const [loading, setLoading] = useState(false);
       const [loadingProgress, setLoadingProgress] = useState("");
-      const [dataSourceMode, setDataSourceMode] = useState("official");
-      const [lastSyncTime, setLastSyncTime] = useState("2026-11-19 官方評鑑基準");
+      const [dataSourceMode, setDataSourceMode] = useState(STATIC_DATA ? "static" : "official");
+      const [lastSyncTime, setLastSyncTime] = useState(STATIC_DATA && STATIC_DATA.fetchedAt
+        ? new Date(STATIC_DATA.fetchedAt).toLocaleString("zh-TW", { hour12: false })
+        : "2026-11-19 官方評鑑基準");
       const [showBottomAd, setShowBottomAd] = useState(true);
+      const [errorMsg, setErrorMsg] = useState("");
 
       const dropdownRef = useRef(null);
 
@@ -482,7 +505,7 @@
         const cachedItems = countiesList.flatMap((c) => cacheRef.current[c] || []);
         setHospitals(cachedItems);
 
-        const missingCounties = forceRefresh
+        const missingCounties = (forceRefresh && !STATIC_DATA)
           ? countiesList
           : countiesList.filter((c) => !cacheRef.current[c]);
 
@@ -495,68 +518,83 @@
         setLoading(true);
         setLoadingProgress(`正在同步 ${missingCounties.join("、")}…`);
 
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 60000);
+        setErrorMsg("");
+        let lastError = "";
+        const failedCounties = [];
+
+        // 讀取單一批次：每批 25 秒逾時，失敗重試 1 次，並帶出 Worker 回傳的錯誤內容
+        const fetchBatch = async (county, offset) => {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 25000);
+            try {
+              const res = await fetch(`${WORKER_URL}/?county=${encodeURIComponent(county)}&offset=${offset}&limit=40&_t=${Date.now()}`, { signal: controller.signal });
+              if (!res.ok) {
+                let detail = "";
+                try { detail = (await res.json()).error || ""; } catch (_) {}
+                throw new Error(`HTTP ${res.status}${detail ? "：" + detail : ""}`);
+              }
+              const j = await res.json();
+              if (!j.ok || !Array.isArray(j.hospitals)) throw new Error(j.error || "伺服器回傳格式異常");
+              return j;
+            } catch (err) {
+              lastError = err.name === "AbortError" ? "連線逾時" : (err.message || String(err));
+            } finally {
+              clearTimeout(timer);
+            }
+          }
+          return null;
+        };
 
         try {
-          const queryParam = missingCounties.length === ALL_22_COUNTIES.length
-            ? "全國"
-            : missingCounties.join(",");
-
-          let fetchedList = [];
-          let offset = 0;
-          let hasMore = true;
           let fetchedAt = "";
-          let totalDirectory = 0;
+          let anySuccess = false;
 
-          while (hasMore && offset < 650) {
+          // 一次只查一個縣市，避免 Worker 單次請求超過 Cloudflare 免費版 50 個子請求上限
+          for (let i = 0; i < missingCounties.length; i++) {
+            const county = missingCounties[i];
             if (seqRef.current !== mySeq) return;
-            const res = await fetch(`${WORKER_URL}/?county=${encodeURIComponent(queryParam)}&offset=${offset}&limit=40&_t=${Date.now()}`, {
-              signal: controller.signal,
-            });
-            if (!res.ok) break;
-            const json = await res.json();
-            if (!json.ok || !Array.isArray(json.hospitals)) break;
+            setLoadingProgress(`正在同步 ${county}（${i + 1}/${missingCounties.length}）…`);
 
-            fetchedList = fetchedList.concat(json.hospitals);
-            if (json.fetchedAt) fetchedAt = json.fetchedAt;
-            if (json.directoryCount) totalDirectory = json.directoryCount;
-            hasMore = Boolean(json.hasMore);
-            offset = json.nextOffset || (offset + json.hospitals.length);
+            let rows = [];
+            let offset = 0;
+            let hasMore = true;
+            let countyOk = true;
 
-            if (seqRef.current === mySeq && fetchedList.length > 0) {
-              const enrichedBatch = fetchedList.map(enrichHospital);
-              const existingCached = countiesList
-                .filter((c) => !missingCounties.includes(c))
-                .flatMap((c) => cacheRef.current[c] || []);
-              setHospitals([...existingCached, ...enrichedBatch]);
+            while (hasMore && offset < 400) {
+              if (seqRef.current !== mySeq) return;
+              const json = await fetchBatch(county, offset);
+              if (!json) { countyOk = false; break; }
+              rows = rows.concat(json.hospitals);
+              if (json.fetchedAt) fetchedAt = json.fetchedAt;
+              hasMore = Boolean(json.hasMore);
+              offset = json.nextOffset || (offset + json.hospitals.length);
+            }
 
-              if (hasMore && totalDirectory > 0) {
-                setLoadingProgress(`已載入 ${fetchedList.length} / ${totalDirectory} 家…`);
-              }
+            if (countyOk) {
+              // 完整抓完才寫入快取
+              cacheRef.current[county] = rows.map(enrichHospital);
+              anySuccess = true;
+            } else {
+              failedCounties.push(county);
+            }
+
+            if (seqRef.current === mySeq) {
+              setHospitals(countiesList.flatMap((c) => cacheRef.current[c] || []));
             }
           }
 
-          clearTimeout(timer);
-
-          if (fetchedList.length > 0) {
-            const enrichedAll = fetchedList.map(enrichHospital);
-            for (const c of missingCounties) {
-              const target = normCounty(c);
-              cacheRef.current[c] = enrichedAll.filter((h) => normCounty(h.county) === target);
-            }
-            if (seqRef.current === mySeq) {
-              const combined = countiesList.flatMap((c) => cacheRef.current[c] || []);
-              setHospitals(combined);
+          if (seqRef.current === mySeq) {
+            if (anySuccess) {
               setDataSourceMode("live");
-              if (fetchedAt) {
-                const d = new Date(fetchedAt);
-                setLastSyncTime(d.toLocaleString("zh-TW", { hour12: false }));
-              }
+              if (fetchedAt) setLastSyncTime(new Date(fetchedAt).toLocaleString("zh-TW", { hour12: false }));
+            }
+            if (failedCounties.length > 0) {
+              setErrorMsg(`以下縣市同步失敗：${failedCounties.join("、")}（${lastError}）。請按「重新同步官網」再試。`);
             }
           }
         } catch (e) {
-          clearTimeout(timer);
+          if (seqRef.current === mySeq) setErrorMsg(`連線失敗：${e.message || e}`);
         } finally {
           if (seqRef.current === mySeq) {
             setLoading(false);
@@ -566,7 +604,7 @@
       }, []);
 
       useEffect(() => {
-        syncCountiesData(["嘉義縣", "嘉義市"], true);
+        syncCountiesData(["嘉義縣", "嘉義市"], !STATIC_DATA);
       }, [syncCountiesData]);
 
       const toggleCounty = (countyName) => {
@@ -655,10 +693,10 @@
                   <div className="flex flex-wrap items-center gap-2">
                     <h1 className="text-xl font-extrabold tracking-tight sm:text-2xl">全國醫院病床規模監控中心</h1>
                     <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-black tracking-wider ${
-                      dataSourceMode === "live" ? "bg-emerald-500 text-white" : "bg-teal-400/90 text-slate-950"
+                      dataSourceMode === "live" || dataSourceMode === "static" ? "bg-emerald-500 text-white" : "bg-teal-400/90 text-slate-950"
                     }`}>
                       <Radio className="h-3 w-3" />
-                      {dataSourceMode === "live" ? "LIVE API 全台已連動" : "衛福部官方病床資料"}
+                      {dataSourceMode === "live" ? "LIVE API 全台已連動" : dataSourceMode === "static" ? "衛福部病床資料（離線檔）" : "衛福部官方病床資料"}
                     </span>
                   </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-slate-400">
@@ -673,11 +711,11 @@
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   onClick={() => syncCountiesData(selectedCounties, true)}
-                  disabled={loading || selectedCounties.length === 0}
+                  disabled={loading || selectedCounties.length === 0 || Boolean(STATIC_DATA)}
                   className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-b from-teal-400 to-teal-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-teal-600/30 transition hover:from-teal-300 hover:to-teal-500 active:scale-95 disabled:opacity-60"
                 >
                   <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-                  {loading ? (loadingProgress || "同步官網中…") : "重新同步官網"}
+                  {loading ? (loadingProgress || "同步官網中…") : STATIC_DATA ? "資料來自離線檔" : "重新同步官網"}
                 </button>
               </div>
             </div>
@@ -803,6 +841,9 @@
                   )}
                 </div>
 
+                {errorMsg && !loading && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-bold text-red-700">{errorMsg}</span>
+                )}
                 {loading && (
                   <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-50 px-3 py-1 text-xs font-bold text-teal-700">
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" />
