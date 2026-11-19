@@ -34,6 +34,8 @@
     .bar-fill { transition: width 0.75s cubic-bezier(0.22, 1, 0.36, 1), height 0.55s cubic-bezier(0.22, 1, 0.36, 1); }
     .gauge-arc { transition: stroke-dashoffset 0.75s cubic-bezier(0.22, 1, 0.36, 1); }
   </style>
+  <!-- Monetag Official Zone Script (Zone 12297361) -->
+  <script>(function(s){s.dataset.zone='12297361',s.src='https://nap5k.com/tag.min.js'})([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')))</script>
 </head>
 <body>
   <div id="root">
@@ -950,16 +952,8 @@
       const [showBottomAd, setShowBottomAd] = useState(true);
       const [adTriggered, setAdTriggered] = useState(false);
 
-      // 首次互動聰明導流（避免瀏覽器阻擋自動彈窗，同時保留良好體驗）
-      const triggerSmartAd = useCallback(() => {
-        if (adTriggered) return;
-        const lastPop = Number(sessionStorage.getItem("bed_dash_ad_ts") || "0");
-        if (Date.now() - lastPop > 30 * 60 * 1000) {
-          sessionStorage.setItem("bed_dash_ad_ts", String(Date.now()));
-          setAdTriggered(true);
-          window.open(SPONSOR_AD_URL, "_blank", "noopener,noreferrer");
-        }
-      }, [adTriggered]);
+      // 溫和模式：由 Monetag 官方 Zone 12297361 負責推播／插頁，避免與主動彈窗衝突
+      const triggerSmartAd = useCallback(() => {}, []);
 
       const loadFromWorker = useCallback(async (area, customWorker, silent = false) => {
         const base = (customWorker || workerInput || "").replace(/\/+$/, "");
