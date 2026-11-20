@@ -114,6 +114,9 @@
     const WORKER_URL = "https://mohw-hospital-beds.readyfly321go.workers.dev";
     const MOHW_PORTAL_URL = "https://openinfo.mohw.gov.tw/";
     const SPONSOR_AD_URL = "https://uplcm.com/4/12128613";
+    /* ★ 每次更新網站請修改這兩行 ★ */
+    const SITE_VERSION = "v1.0.0";
+    const SITE_UPDATED = "2026-11-20";
 
     // 統一將「臺」標準化為「台」，避免與衛福部回傳的「臺北市／臺中市／臺南市／臺東縣」比對落空
     const normCounty = (str) => String(str || "").trim().replace(/臺/g, "台");
@@ -701,6 +704,7 @@
                   </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-slate-400">
                     <span>資料基準：{lastSyncTime}</span>
+                    <span className="inline-flex items-center gap-1 rounded bg-white/10 px-1.5 py-0.5 text-[11px] font-bold text-slate-200">🔖 {SITE_VERSION}｜網站更新 {SITE_UPDATED}</span>
                     <a href={MOHW_PORTAL_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-teal-300 hover:underline">
                       來源：衛福部醫院評鑑資訊專區 (openinfo.mohw.gov.tw) <ExternalLink className="h-3 w-3" />
                     </a>
@@ -957,6 +961,7 @@
             </section>
 
             <footer className="space-y-1.5 pb-24 pt-3 text-center text-xs text-slate-500">
+              <p className="font-bold text-slate-600">網站版本 {SITE_VERSION}　｜　網站更新日期 {SITE_UPDATED}　｜　資料基準 {lastSyncTime}</p>
               <p className="font-semibold text-slate-600">© 2026 全國醫院病床規模整合監控中心 ｜ 版權所有 · All Rights Reserved</p>
               <p className="text-slate-400">
                 資料來源：衛生福利部醫院評鑑資訊專區（<a href={MOHW_PORTAL_URL} target="_blank" rel="noreferrer" className="text-teal-700 hover:underline">openinfo.mohw.gov.tw</a>）公開數據整合呈現，實際即時空床與收治狀況請以各醫療院所現場公告為準。
